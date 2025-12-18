@@ -4,6 +4,8 @@ import {
 	ConsoleLogger,
 	DuckDBDataProtocol,
 	getPlatformFeatures,
+	getJsDelivrBundles,
+	selectBundle,
 	VoidLogger
 } from '@duckdb/duckdb-wasm';
 
@@ -35,28 +37,52 @@ export async function initDB() {
 	// to initialize the database
 	initializing = true;
 	try {
-		const useEh = await getPlatformFeatures().then((x) => x.wasmExceptions);
-
-		const DUCKDB_CONFIG = useEh
-			? {
-					mainModule: (await import('@duckdb/duckdb-wasm/dist/duckdb-eh.wasm?url')).default,
-					mainWorker: (await import('@duckdb/duckdb-wasm/dist/duckdb-browser-eh.worker.js?worker'))
-						.default
-				}
-			: {
-					mainModule: (await import('@duckdb/duckdb-wasm/dist/duckdb-mvp.wasm?url')).default,
-					mainWorker: (await import('@duckdb/duckdb-wasm/dist/duckdb-browser-mvp.worker.js?worker'))
-						.default
-				};
-
 		const logger = import.meta.env.VITE_EVIDENCE_DEBUG ? new ConsoleLogger() : new VoidLogger();
-		const worker = new DUCKDB_CONFIG.mainWorker();
+		const useCdn = import.meta.env.VITE_EVIDENCE_DUCKDB_CDN === 'true';
 
-		// use an intermediate variable to prevent db from being a not-ready database
-		const _db = new AsyncDuckDB(logger, worker);
-		window[Symbol.for('EVIDENCE_QUERY_ENGINE')] = _db;
+		/** @type {import("@duckdb/duckdb-wasm").AsyncDuckDB} */
+		let _db;
 
-		await _db.instantiate(DUCKDB_CONFIG.mainModule);
+		if (useCdn) {
+			// Load DuckDB WASM from jsDelivr CDN
+			// This is useful for platforms with file size limits (e.g., Cloudflare Pages 25MB limit)
+			const bundles = getJsDelivrBundles();
+			const bundle = await selectBundle(bundles);
+
+			// Create worker from CDN URL using a blob
+			const workerUrl = URL.createObjectURL(
+				new Blob([`importScripts("${bundle.mainWorker}");`], { type: 'text/javascript' })
+			);
+			const worker = new Worker(workerUrl);
+
+			_db = new AsyncDuckDB(logger, worker);
+			window[Symbol.for('EVIDENCE_QUERY_ENGINE')] = _db;
+
+			await _db.instantiate(bundle.mainModule, bundle.pthreadWorker);
+			URL.revokeObjectURL(workerUrl);
+		} else {
+			// Load DuckDB WASM from bundled files (default behavior)
+			const useEh = await getPlatformFeatures().then((x) => x.wasmExceptions);
+
+			const DUCKDB_CONFIG = useEh
+				? {
+						mainModule: (await import('@duckdb/duckdb-wasm/dist/duckdb-eh.wasm?url')).default,
+						mainWorker: (await import('@duckdb/duckdb-wasm/dist/duckdb-browser-eh.worker.js?worker'))
+							.default
+					}
+				: {
+						mainModule: (await import('@duckdb/duckdb-wasm/dist/duckdb-mvp.wasm?url')).default,
+						mainWorker: (await import('@duckdb/duckdb-wasm/dist/duckdb-browser-mvp.worker.js?worker'))
+							.default
+					};
+
+			const worker = new DUCKDB_CONFIG.mainWorker();
+
+			_db = new AsyncDuckDB(logger, worker);
+			window[Symbol.for('EVIDENCE_QUERY_ENGINE')] = _db;
+
+			await _db.instantiate(DUCKDB_CONFIG.mainModule);
+		}
 		db = _db;
 
 		await db.open({
