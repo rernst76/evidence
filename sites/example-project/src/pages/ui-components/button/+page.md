@@ -1,4 +1,5 @@
 <script>
+    import {Button} from '@evidence-dev/core-components'
     import {Pencil} from '@evidence-dev/component-utilities/icons'
 
     const icons = [
